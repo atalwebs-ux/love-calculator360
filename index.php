@@ -228,6 +228,7 @@ if ($method === 'POST' && $path === '/api/auth/register') {
     $name = trim((string)($b['name'] ?? ''));
     $email = strtolower(trim((string)($b['email'] ?? '')));
     $password = (string)($b['password'] ?? '');
+    $firebaseUid = trim((string)($b['firebaseUid'] ?? ''));
     if (!$name || !$email || !$password) {
         jsonResponse(400, ['error' => 'All fields (name, email, password) are required']);
     }
@@ -240,10 +241,10 @@ if ($method === 'POST' && $path === '/api/auth/register') {
         jsonResponse(409, ['error' => 'An account with this email already exists']);
     }
     $hash = password_hash($password, PASSWORD_BCRYPT);
-    $ins = $pdo->prepare('INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)');
-    $ins->execute([$name, $email, $hash]);
+    $ins = $pdo->prepare('INSERT INTO users (name, email, firebase_uid, password_hash) VALUES (?, ?, ?, ?)');
+    $ins->execute([$name, $email, $firebaseUid !== '' ? $firebaseUid : null, $hash]);
     $id = (int)$pdo->lastInsertId();
-    $u = $pdo->prepare('SELECT id, name, email, created_at FROM users WHERE id = ?');
+    $u = $pdo->prepare('SELECT id, name, email, firebase_uid, created_at FROM users WHERE id = ?');
     $u->execute([$id]);
     $user = $u->fetch();
     $token = signJwt(['id' => (int)$user['id'], 'email' => $user['email'], 'name' => $user['name']]);
@@ -254,6 +255,7 @@ if ($method === 'POST' && $path === '/api/auth/register') {
             'id' => (int)$user['id'],
             'name' => $user['name'],
             'email' => $user['email'],
+            'firebaseUid' => $user['firebase_uid'] ?: null,
             'createdAt' => $user['created_at'],
         ],
     ]);
@@ -263,6 +265,7 @@ if ($method === 'POST' && $path === '/api/auth/login') {
     $b = getJsonBody();
     $email = strtolower(trim((string)($b['email'] ?? '')));
     $password = (string)($b['password'] ?? '');
+    $firebaseUid = trim((string)($b['firebaseUid'] ?? ''));
     if (!$email || !$password) {
         jsonResponse(400, ['error' => 'Email and password are required']);
     }
@@ -272,6 +275,11 @@ if ($method === 'POST' && $path === '/api/auth/login') {
     if (!$user || !password_verify($password, $user['password_hash'])) {
         jsonResponse(401, ['error' => 'Invalid email or password']);
     }
+    if ($firebaseUid !== '' && empty($user['firebase_uid'])) {
+        $upd = $pdo->prepare('UPDATE users SET firebase_uid = ? WHERE id = ?');
+        $upd->execute([$firebaseUid, $user['id']]);
+        $user['firebase_uid'] = $firebaseUid;
+    }
     $token = signJwt(['id' => (int)$user['id'], 'email' => $user['email'], 'name' => $user['name']]);
     jsonResponse(200, [
         'message' => 'Login successful!',
@@ -280,6 +288,7 @@ if ($method === 'POST' && $path === '/api/auth/login') {
             'id' => (int)$user['id'],
             'name' => $user['name'],
             'email' => $user['email'],
+            'firebaseUid' => $user['firebase_uid'] ?: null,
             'createdAt' => $user['created_at'],
         ],
     ]);
@@ -341,18 +350,23 @@ if ($method === 'POST' && $path === '/api/auth/google') {
     }
 
     $displayName = $name !== '' ? substr($name, 0, 100) : explode('@', $email)[0];
+    $firebaseUid = trim((string)($b['firebaseUid'] ?? ''));
 
-    $st = $pdo->prepare('SELECT id, name, email, created_at FROM users WHERE email = ?');
+    $st = $pdo->prepare('SELECT id, name, email, firebase_uid, created_at FROM users WHERE email = ?');
     $st->execute([$email]);
     $user = $st->fetch();
 
     if (!$user) {
-        $ins = $pdo->prepare('INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)');
-        $ins->execute([$displayName, $email, 'GOOGLE_OAUTH_USER']);
+        $ins = $pdo->prepare('INSERT INTO users (name, email, firebase_uid, password_hash) VALUES (?, ?, ?, ?)');
+        $ins->execute([$displayName, $email, $firebaseUid !== '' ? $firebaseUid : null, 'GOOGLE_OAUTH_USER']);
         $id = (int)$pdo->lastInsertId();
-        $st = $pdo->prepare('SELECT id, name, email, created_at FROM users WHERE id = ?');
+        $st = $pdo->prepare('SELECT id, name, email, firebase_uid, created_at FROM users WHERE id = ?');
         $st->execute([$id]);
         $user = $st->fetch();
+    } elseif ($firebaseUid !== '' && empty($user['firebase_uid'])) {
+        $upd = $pdo->prepare('UPDATE users SET firebase_uid = ? WHERE id = ?');
+        $upd->execute([$firebaseUid, $user['id']]);
+        $user['firebase_uid'] = $firebaseUid;
     }
 
     $token = signJwt(['id' => (int)$user['id'], 'email' => $user['email'], 'name' => $user['name']]);
@@ -363,6 +377,65 @@ if ($method === 'POST' && $path === '/api/auth/google') {
             'id' => (int)$user['id'],
             'name' => $user['name'],
             'email' => $user['email'],
+            'firebaseUid' => $user['firebase_uid'] ?: null,
+            'createdAt' => $user['created_at'],
+        ],
+    ]);
+}
+
+if ($method === 'POST' && $path === '/api/auth/firebase') {
+    $b = getJsonBody();
+    $firebaseUid = trim((string)($b['firebaseUid'] ?? ''));
+    if ($firebaseUid === '') {
+        jsonResponse(400, ['error' => 'firebaseUid is required']);
+    }
+    $phone = !empty($b['phoneNumber']) ? trim((string)$b['phoneNumber']) : null;
+    $email = !empty($b['email']) ? strtolower(trim((string)$b['email'])) : null;
+    $name = trim((string)($b['name'] ?? ''));
+    $displayName = $name !== '' ? substr($name, 0, 100) : ($phone ?: ($email ? explode('@', $email)[0] : 'Love User'));
+
+    $st = $pdo->prepare('SELECT id, name, email, phone_number, firebase_uid, created_at FROM users WHERE firebase_uid = ?');
+    $st->execute([$firebaseUid]);
+    $user = $st->fetch();
+
+    if (!$user && $phone) {
+        $st = $pdo->prepare('SELECT id, name, email, phone_number, firebase_uid, created_at FROM users WHERE phone_number = ?');
+        $st->execute([$phone]);
+        $user = $st->fetch();
+    }
+    if (!$user && $email) {
+        $st = $pdo->prepare('SELECT id, name, email, phone_number, firebase_uid, created_at FROM users WHERE email = ?');
+        $st->execute([$email]);
+        $user = $st->fetch();
+    }
+
+    if (!$user) {
+        $ins = $pdo->prepare('INSERT INTO users (name, email, phone_number, firebase_uid, password_hash) VALUES (?, ?, ?, ?, ?)');
+        $ins->execute([$displayName, $email, $phone, $firebaseUid, 'FIREBASE_AUTH_USER']);
+        $id = (int)$pdo->lastInsertId();
+        $st = $pdo->prepare('SELECT id, name, email, phone_number, firebase_uid, created_at FROM users WHERE id = ?');
+        $st->execute([$id]);
+        $user = $st->fetch();
+    } else {
+        $upd = $pdo->prepare(
+            'UPDATE users SET firebase_uid = COALESCE(firebase_uid, ?), phone_number = COALESCE(?, phone_number), email = COALESCE(?, email), name = COALESCE(NULLIF(?, \'\'), name) WHERE id = ?'
+        );
+        $upd->execute([$firebaseUid, $phone, $email, $displayName, $user['id']]);
+        $st = $pdo->prepare('SELECT id, name, email, phone_number, firebase_uid, created_at FROM users WHERE id = ?');
+        $st->execute([$user['id']]);
+        $user = $st->fetch();
+    }
+
+    $token = signJwt(['id' => (int)$user['id'], 'email' => $user['email'], 'name' => $user['name']]);
+    jsonResponse(200, [
+        'message' => 'Firebase user synced with MySQL!',
+        'token' => $token,
+        'user' => [
+            'id' => (int)$user['id'],
+            'name' => $user['name'],
+            'email' => $user['email'] ?? '',
+            'phoneNumber' => $user['phone_number'] ?? null,
+            'firebaseUid' => $user['firebase_uid'] ?: $firebaseUid,
             'createdAt' => $user['created_at'],
         ],
     ]);
